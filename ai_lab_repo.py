@@ -677,7 +677,7 @@ if __name__ == "__main__":
          "note": "Use a reasonable dataset size (up to 1000 data points) since we're running inference locally and don't have API constraints."},
 
         {"phases": ["data preparation", "running experiments"],
-         "note": "You are running on a MacBook/Windows laptop. You can use 'mps' with PyTorch for GPU acceleration."},
+         "note": "For GPU acceleration: Use 'cuda' for NVIDIA GPUs, 'mps' for Apple Silicon, or 'cpu' for systems without GPU support. The code should automatically detect and use the best available device."},
 
         {"phases": ["data preparation", "running experiments"],
          "note": "Generate figures with very colorful and artistic design."},
