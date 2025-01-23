@@ -611,6 +611,11 @@ def parse_arguments():
         help='Total number of paper-solver steps'
     )
 
+    parser.add_argument(
+        '--ollama-model',
+        type=str,
+        help='Specify the Ollama model to use (e.g., llama2, codellama, deepseek-r1)'
+    )
 
     return parser.parse_args()
 
@@ -636,14 +641,18 @@ if __name__ == "__main__":
         raise Exception("args.papersolver_max_steps must be a valid integer!")
 
 
-    api_key = os.getenv('OPENAI_API_KEY') or args.api_key
-    deepseek_api_key = os.getenv('DEEPSEEK_API_KEY') or args.deepseek_api_key
-    if args.api_key is not None and os.getenv('OPENAI_API_KEY') is None:
-        os.environ["OPENAI_API_KEY"] = args.api_key
-    if args.deepseek_api_key is not None and os.getenv('DEEPSEEK_API_KEY') is None:
-        os.environ["DEEPSEEK_API_KEY"] = args.deepseek_api_key
-
-    if not api_key and not deepseek_api_key:
+    # Modify the API key validation logic
+    if args.llm_backend.startswith("ollama-"):
+        api_key = None  # No API key needed for Ollama
+    elif args.api_key:
+        api_key = args.api_key
+    elif args.deepseek_api_key and args.llm_backend in ["deepseek-chat", "deepseek-reasoner"]:
+        api_key = args.deepseek_api_key
+    elif os.getenv('OPENAI_API_KEY'):
+        api_key = os.getenv('OPENAI_API_KEY')
+    elif os.getenv('DEEPSEEK_API_KEY') and args.llm_backend in ["deepseek-chat", "deepseek-reasoner"]:
+        api_key = os.getenv('DEEPSEEK_API_KEY')
+    else:
         raise ValueError("API key must be provided via --api-key / -deepseek-api-key or the OPENAI_API_KEY / DEEPSEEK_API_KEY environment variable.")
 
     ##########################################################
@@ -728,9 +737,3 @@ if __name__ == "__main__":
         )
 
     lab.perform_research()
-
-
-
-
-
-
