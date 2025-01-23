@@ -15,26 +15,63 @@ def curr_cost_est():
         "o1-preview": 15.00 / 1000000,
         "o1-mini": 3.00 / 1000000,
         "claude-3-5-sonnet": 3.00 / 1000000,
-        "deepseek-chat": 1.00 / 1000000,
+        "deepseek-chat": 0.14 / 1000000,      # $0.14 per 1M tokens (cache miss)
+        "deepseek-reasoner": 0.55 / 1000000,  # $0.55 per 1M tokens (cache miss)
         "o1": 15.00 / 1000000,
     }
     costmap_out = {
-        "gpt-4o": 10.00/ 1000000,
+        "gpt-4o": 10.00 / 1000000,
         "gpt-4o-mini": 0.6 / 1000000,
         "o1-preview": 60.00 / 1000000,
         "o1-mini": 12.00 / 1000000,
         "claude-3-5-sonnet": 12.00 / 1000000,
-        "deepseek-chat": 5.00 / 1000000,
+        "deepseek-chat": 0.28 / 1000000,      # $0.28 per 1M tokens
+        "deepseek-reasoner": 2.19 / 1000000,  # $2.19 per 1M tokens
         "o1": 60.00 / 1000000,
     }
     return sum([costmap_in[_]*TOKENS_IN[_] for _ in TOKENS_IN]) + sum([costmap_out[_]*TOKENS_OUT[_] for _ in TOKENS_OUT])
 
+import requests
+
 def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic_api_key=None, tries=5, timeout=5.0, temp=None, print_cost=True, version="1.5"):
     preloaded_api = os.getenv('OPENAI_API_KEY')
-    if openai_api_key is None and preloaded_api is not None:
+    deepseek_api = os.getenv('DEEPSEEK_API_KEY')
+    
+    # Add Ollama model handling
+    if model_str.startswith("ollama-"):
+        for _ in range(tries):
+            try:
+                ollama_model = model_str.replace("ollama-", "")
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+                response = requests.post(
+                    "http://localhost:11434/api/chat",
+                    json={
+                        "model": ollama_model,
+                        "messages": messages,
+                        "stream": False,
+                        "temperature": temp if temp is not None else 0.7
+                    }
+                )
+                response.raise_for_status()
+                return response.json()["message"]["content"]
+            except Exception as e:
+                print(f"Ollama API Error: {e}")
+                time.sleep(timeout)
+                continue
+        raise Exception("Max retries: timeout for Ollama")
+
+    # Check for DeepSeek models first
+    if model_str in ["deepseek-chat", "deepseek-reasoner"]:
+        if not deepseek_api:
+            raise Exception("No DeepSeek API key provided")
+    elif openai_api_key is None and preloaded_api is not None:
         openai_api_key = preloaded_api
-    if openai_api_key is None and anthropic_api_key is None:
+    elif openai_api_key is None and anthropic_api_key is None:
         raise Exception("No API key provided in query_model function")
+
     if openai_api_key is not None:
         openai.api_key = openai_api_key
         os.environ["OPENAI_API_KEY"] = openai_api_key
@@ -98,8 +135,8 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
                         completion = client.chat.completions.create(
                             model="gpt-4o-2024-08-06", messages=messages, temperature=temp)
                 answer = completion.choices[0].message.content
-            elif model_str == "deepseek-chat":
-                model_str = "deepseek-chat"
+            elif model_str == "deepseek-chat" or model_str == "deepseek-reasoner":
+                model_str = model_str
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}]
@@ -112,11 +149,11 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
                     )
                     if temp is None:
                         completion = deepseek_client.chat.completions.create(
-                            model="deepseek-chat",
+                            model=model_str,
                             messages=messages)
                     else:
                         completion = deepseek_client.chat.completions.create(
-                            model="deepseek-chat",
+                            model=model_str,
                             messages=messages,
                             temperature=temp)
                 answer = completion.choices[0].message.content
@@ -160,9 +197,9 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
                         model="o1-preview", messages=messages)
                 answer = completion.choices[0].message.content
 
-            if model_str in ["o1-preview", "o1-mini", "claude-3.5-sonnet", "o1"]:
+            if model_str in ["o1-preview", "o1-mini", "claude-3-5-sonnet", "o1"]:
                 encoding = tiktoken.encoding_for_model("gpt-4o")
-            elif model_str in ["deepseek-chat"]:
+            elif model_str in ["deepseek-chat", "deepseek-reasoner"]:
                 encoding = tiktoken.encoding_for_model("cl100k_base")
             else:
                 encoding = tiktoken.encoding_for_model(model_str)
@@ -182,3 +219,10 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
 
 
 #print(query_model(model_str="o1-mini", prompt="hi", system_prompt="hey"))
+
+# Test at the bottom of the file
+#print(query_model(
+   #model_str="ollama-deepseek-r1:1.5b", 
+   #prompt="What is machine learning?", 
+   #system_prompt="You are a helpful AI assistant."
+#))
