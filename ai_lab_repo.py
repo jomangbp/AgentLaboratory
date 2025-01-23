@@ -665,25 +665,25 @@ if __name__ == "__main__":
 
     task_notes_LLM = [
         {"phases": ["plan formulation"],
-         "note": f"You should come up with a plan for TWO experiments."},
+         "note": "You should come up with a plan for TWO experiments."},
 
         {"phases": ["plan formulation", "data preparation", "running experiments"],
-         "note": "Please use gpt-4o-mini for your experiments."},
+         "note": "Please use local models through Ollama for your experiments."},
 
         {"phases": ["running experiments"],
-         "note": f'Use the following code to inference gpt-4o-mini: \nfrom openai import OpenAI\nos.environ["OPENAI_API_KEY"] = "{api_key}"\nclient = OpenAI()\ncompletion = client.chat.completions.create(\nmodel="gpt-4o-mini-2024-07-18", messages=messages)\nanswer = completion.choices[0].message.content\n'},
+         "note": "Since we're using local models through Ollama, there's no need to worry about API costs or rate limits. Feel free to make multiple model calls as needed for better results."},
 
         {"phases": ["running experiments"],
-         "note": f"You have access to only gpt-4o-mini using the OpenAI API, please use the following key {api_key} but do not use too many inferences. Do not use openai.ChatCompletion.create or any openai==0.28 commands. Instead use the provided inference code."},
-
-        {"phases": ["running experiments"],
-         "note": "I would recommend using a small dataset (approximately only 100 data points) to run experiments in order to save time. Do not use much more than this unless you have to or are running the final tests."},
+         "note": "Use a reasonable dataset size (up to 1000 data points) since we're running inference locally and don't have API constraints."},
 
         {"phases": ["data preparation", "running experiments"],
-         "note": "You are running on a MacBook laptop. You can use 'mps' with PyTorch"},
+         "note": "You are running on a MacBook/Windows laptop. You can use 'mps' with PyTorch for GPU acceleration."},
 
         {"phases": ["data preparation", "running experiments"],
          "note": "Generate figures with very colorful and artistic design."},
+
+        {"phases": ["running experiments", "results interpretation"],
+         "note": "Take advantage of the local model's speed to perform multiple iterations and validations of your results."}
     ]
 
     task_notes_LLM.append(
