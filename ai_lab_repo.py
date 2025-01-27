@@ -446,55 +446,71 @@ class LaboratoryWorkflow:
         @return: (bool) whether to repeat the phase
         """
         arx_eng = ArxivSearch()
-        max_tries = self.max_steps * 5 # lit review often requires extra steps
-        # get initial response from PhD agent
-        resp = self.phd.inference(self.research_topic, "literature review", step=0, temp=0.8)
-        if self.verbose: print(resp, "\n~~~~~~~~~~~")
-        # iterate until max num tries to complete task is exhausted
-        for _i in range(max_tries):
-            feedback = str()
+        max_tries = self.max_steps * 5  # lit review often requires extra steps
+        try:
+            # get initial response from PhD agent with timeout
+            resp = self.phd.inference(self.research_topic, "literature review", step=0, temp=0.8)
+            if resp is None or resp.strip() == "":
+                print("Warning: Empty response from PhD agent, retrying phase...")
+                return True
 
-            # grab summary of papers from arxiv
-            if "```SUMMARY" in resp:
-                query = extract_prompt(resp, "SUMMARY")
-                papers = arx_eng.find_papers_by_str(query, N=self.arxiv_num_summaries)
-                feedback = f"You requested arXiv papers related to the query {query}, here was the response\n{papers}"
+            if self.verbose: 
+                print("Initial PhD response:", resp, "\n~~~~~~~~~~~")
 
-            # grab full text from arxiv ID
-            elif "```FULL_TEXT" in resp:
-                query = extract_prompt(resp, "FULL_TEXT")
-                # expiration timer so that paper does not remain in context too long
-                arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + arx_eng.retrieve_full_paper_text(query) + "```"
-                feedback = arxiv_paper
+            # iterate until max num tries to complete task is exhausted
+            for _i in range(max_tries):
+                feedback = str()
+                
+                # Add timeout check
+                if _i > 0 and _i % 10 == 0:
+                    print(f"Literature review in progress... Step {_i}/{max_tries}")
 
-            # if add paper, extract and add to lit review, provide feedback
-            elif "```ADD_PAPER" in resp:
-                query = extract_prompt(resp, "ADD_PAPER")
-                feedback, text = self.phd.add_review(query, arx_eng)
-                if len(self.reference_papers) < self.num_ref_papers:
-                    self.reference_papers.append(text)
+                # grab summary of papers from arxiv
+                if "```SUMMARY" in resp:
+                    query = extract_prompt(resp, "SUMMARY")
+                    papers = arx_eng.find_papers_by_str(query, N=self.arxiv_num_summaries)
+                    feedback = f"You requested arXiv papers related to the query {query}, here was the response\n{papers}"
 
-            # completion condition
-            if len(self.phd.lit_review) >= self.num_papers_lit_review:
-                # generate formal review
-                lit_review_sum = self.phd.format_review()
-                # if human in loop -> check if human is happy with the produced review
-                if self.human_in_loop_flag["literature review"]:
-                    retry = self.human_in_loop("literature review", lit_review_sum)
-                    # if not happy, repeat the process with human feedback
-                    if retry:
-                        self.phd.lit_review = []
-                        return retry
-                # otherwise, return lit review and move on to next stage
-                if self.verbose: print(self.phd.lit_review_sum)
-                # set agent
-                self.set_agent_attr("lit_review_sum", lit_review_sum)
-                # reset agent state
-                self.reset_agents()
-                self.statistics_per_phase["literature review"]["steps"] = _i
-                return False
-            resp = self.phd.inference(self.research_topic, "literature review", feedback=feedback, step=_i + 1, temp=0.8)
-            if self.verbose: print(resp, "\n~~~~~~~~~~~")
+                # grab full text from arxiv ID
+                elif "```FULL_TEXT" in resp:
+                    query = extract_prompt(resp, "FULL_TEXT")
+                    # expiration timer so that paper does not remain in context too long
+                    arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + arx_eng.retrieve_full_paper_text(query) + "```"
+                    feedback = arxiv_paper
+
+                # if add paper, extract and add to lit review, provide feedback
+                elif "```ADD_PAPER" in resp:
+                    query = extract_prompt(resp, "ADD_PAPER")
+                    feedback, text = self.phd.add_review(query, arx_eng)
+                    if len(self.reference_papers) < self.num_ref_papers:
+                        self.reference_papers.append(text)
+
+                # completion condition
+                if len(self.phd.lit_review) >= self.num_papers_lit_review:
+                    lit_review_sum = self.phd.format_review()
+                    if lit_review_sum and lit_review_sum.strip():
+                        if self.human_in_loop_flag["literature review"]:
+                            retry = self.human_in_loop("literature review", lit_review_sum)
+                            if retry:
+                                self.phd.lit_review = []
+                                return retry
+                        if self.verbose: 
+                            print(self.phd.lit_review_sum)
+                        self.set_agent_attr("lit_review_sum", lit_review_sum)
+                        self.reset_agents()
+                        self.statistics_per_phase["literature review"]["steps"] = _i
+                        return False
+                
+                resp = self.phd.inference(self.research_topic, "literature review", 
+                                        feedback=feedback, step=_i + 1, temp=0.8)
+                if resp is None or resp.strip() == "":
+                    print("Warning: Empty response from PhD agent, retrying step...")
+                    continue
+
+        except Exception as e:
+            print(f"Error in literature review: {str(e)}")
+            return True
+
         raise Exception("Max tries during phase: Literature Review")
 
     def human_in_loop(self, phase, phase_prod):
