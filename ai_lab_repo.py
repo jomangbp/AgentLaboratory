@@ -2,7 +2,6 @@ from agents import *
 from copy import copy
 from common_imports import *
 from mlesolver import MLESolver
-from torch.backends.mkl import verbose
 
 import argparse
 import pickle
@@ -11,7 +10,12 @@ DEFAULT_LLM_BACKBONE = "o1-mini"
 
 
 class LaboratoryWorkflow:
-    def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), human_in_loop_flag=None, compile_pdf=True, mlesolver_max_steps=3, papersolver_max_steps=5):
+    def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), 
+             human_in_loop_flag={"literature review": False, "plan formulation": False, 
+                                "data preparation": False, "running experiments": False,
+                                "results interpretation": False, "report writing": False,
+                                "report refinement": False}, 
+             compile_pdf=True, mlesolver_max_steps=3, papersolver_max_steps=5):
         """
         Initialize laboratory workflow
         @param research_topic: (str) description of research idea to explore
@@ -39,7 +43,7 @@ class LaboratoryWorkflow:
         ####### COMPUTE BUDGET PARAMETERS ########
         ##########################################
         self.num_ref_papers = 1
-        self.review_total_steps = 0 # num steps to take if overridden
+        self.review_total_steps = 1  # Añadir un valor por defecto
         self.arxiv_num_summaries = 5
         self.mlesolver_max_steps = mlesolver_max_steps
         self.papersolver_max_steps = papersolver_max_steps
@@ -208,7 +212,8 @@ class LaboratoryWorkflow:
         print("Reviews:", reviews)
         if self.human_in_loop_flag["report refinement"]:
             print(f"Provided are reviews from a set of three reviewers: {reviews}")
-            input("Would you like to be completed with the project or should the agents go back and improve their experimental results?\n (y) for go back (n) for complete project: ")
+            response = input("Would you like to be completed with the project or should the agents go back and improve their experimental results?\n (y) for go back (n) for complete project: ")
+            return response.lower().strip()[0] == 'y'
         else:
             review_prompt = f"Provided are reviews from a set of three reviewers: {reviews}. Would you like to be completed with the project or do you want to go back to the planning phase and improve your experiments?\n Type y and nothing else to go back, type n and nothing else for complete project."
             self.phd.phases.append("report refinement")
@@ -225,12 +230,14 @@ class LaboratoryWorkflow:
                 raise Exception("Model did not respond")
             response = response.lower().strip()[0]
             if response == "n":
-                if verbose: print("*"*40, "\n", "REVIEW COMPLETE", "\n", "*"*40)
+                if self.verbose:  # Changed from verbose to self.verbose
+                    print("*"*40, "\n", "REVIEW COMPLETE", "\n", "*"*40)
                 return False
             elif response == "y":
                 self.set_agent_attr("reviewer_response", f"Provided are reviews from a set of three reviewers: {reviews}.")
                 return True
-            else: raise Exception("Model did not respond")
+            else: 
+                raise Exception("Model did not respond")
 
     def report_writing(self):
         """
@@ -254,7 +261,7 @@ class LaboratoryWorkflow:
             ref_papers=self.reference_papers,
             topic=self.research_topic,  # Changed from research_topic
             openai_api_key=self.openai_api_key,
-            llm_str=self.model_backbone["report writing"],
+            llm_str=self.model_backbone["report writing"] if isinstance(self.model_backbone, dict) else self.model_backbone,
             compile_pdf=self.compile_pdf  # Changed from compile_pdf
         )
         # run initialization for solver
@@ -320,7 +327,14 @@ class LaboratoryWorkflow:
         experiment_notes = [_note["note"] for _note in self.ml_engineer.notes if "running experiments" in _note["phases"]]
         experiment_notes = f"Notes for the task objective: {experiment_notes}\n" if len(experiment_notes) > 0 else ""
         # instantiate mle-solver
-        solver = MLESolver(dataset_code=self.ml_engineer.dataset_code, notes=experiment_notes, insights=self.ml_engineer.lit_review_sum, max_steps=self.mlesolver_max_steps, plan=self.ml_engineer.plan, openai_api_key=self.openai_api_key, llm_str=self.model_backbone["running experiments"])
+        llm_str = self.model_backbone["running experiments"] if isinstance(self.model_backbone, dict) else self.model_backbone
+        solver = MLESolver(dataset_code=self.ml_engineer.dataset_code, 
+                          notes=experiment_notes, 
+                          insights=self.ml_engineer.lit_review_sum, 
+                          max_steps=self.mlesolver_max_steps, 
+                          plan=self.ml_engineer.plan, 
+                          openai_api_key=self.openai_api_key, 
+                          llm_str=llm_str)
         # run initialization for solver
         solver.initial_solve()
         # run solver for N mle optimization steps
@@ -334,7 +348,7 @@ class LaboratoryWorkflow:
         exp_results = solver.best_codes[0][2]
         if self.verbose: print(f"Running experiments completed, reward function score: {score}")
         if self.human_in_loop_flag["running experiments"]:
-            retry = self.human_in_loop("data preparation", code)
+            retry = self.human_in_loop("running experiments", code)  # Corregido de "data preparation"
             if retry: return retry
         save_to_file("./research_dir/src", "run_experiments.py", code)
         self.set_agent_attr("results_code", code)
@@ -522,6 +536,9 @@ class LaboratoryWorkflow:
 
         except Exception as e:
             print(f"Error in literature review: {str(e)}")
+            if "Max retries exceeded" in str(e):
+                print("ArXiv API rate limit reached. Waiting before retrying...")
+                time.sleep(60)  # Esperar 1 minuto
             return True
 
         raise Exception("Max tries during phase: Literature Review")
@@ -621,22 +638,22 @@ def parse_arguments():
 
     parser.add_argument(
         '--num-papers-lit-review',
-        type=str,
-        default="5",
+        type=int,  # Cambiar de str a int
+        default=5,
         help='Total number of papers to summarize in literature review stage'
     )
 
     parser.add_argument(
         '--mlesolver-max-steps',
-        type=str,
-        default="3",
+        type=int,  # Cambiar de str a int
+        default=3,
         help='Total number of mle-solver steps'
     )
 
     parser.add_argument(
         '--papersolver-max-steps',
-        type=str,
-        default="5",
+        type=int,  # Cambiar de str a int
+        default=5,
         help='Total number of paper-solver steps'
     )
 
@@ -656,19 +673,11 @@ if __name__ == "__main__":
     human_mode = args.copilot_mode.lower() == "true"
     compile_pdf = args.compile_latex.lower() == "true"
     load_existing = args.load_existing.lower() == "true"
-    try:
-        num_papers_lit_review = int(args.num_papers_lit_review.lower())
-    except Exception:
-        raise Exception("args.num_papers_lit_review must be a valid integer!")
-    try:
-        papersolver_max_steps = int(args.papersolver_max_steps.lower())
-    except Exception:
-        raise Exception("args.papersolver_max_steps must be a valid integer!")
-    try:
-        mlesolver_max_steps = int(args.mlesolver_max_steps.lower())
-    except Exception:
-        raise Exception("args.papersolver_max_steps must be a valid integer!")
-
+    
+    # Fix: Remove .lower() since args.num_papers_lit_review is already an int
+    num_papers_lit_review = args.num_papers_lit_review
+    papersolver_max_steps = args.papersolver_max_steps
+    mlesolver_max_steps = args.mlesolver_max_steps
 
     # Modify the API key validation logic
     if args.llm_backend.startswith("ollama-"):
