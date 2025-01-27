@@ -243,7 +243,20 @@ class LaboratoryWorkflow:
         # instantiate mle-solver
         from papersolver import PaperSolver
         self.reference_papers = []
-        solver = PaperSolver(notes=report_notes, max_steps=self.papersolver_max_steps, plan=lab.phd.plan, exp_code=lab.phd.results_code, exp_results=lab.phd.exp_results, insights=lab.phd.interpretation, lit_review=lab.phd.lit_review, ref_papers=self.reference_papers, topic=research_topic, openai_api_key=self.openai_api_key, llm_str=self.model_backbone["report writing"], compile_pdf=compile_pdf)
+        solver = PaperSolver(
+            notes=report_notes, 
+            max_steps=self.papersolver_max_steps, 
+            plan=self.phd.plan,  # Changed from lab.phd.plan
+            exp_code=self.phd.results_code,  # Changed from lab.phd.results_code
+            exp_results=self.phd.exp_results,  # Changed from lab.phd.exp_results
+            insights=self.phd.interpretation,  # Changed from lab.phd.interpretation
+            lit_review=self.phd.lit_review,  # Changed from lab.phd.lit_review
+            ref_papers=self.reference_papers,
+            topic=self.research_topic,  # Changed from research_topic
+            openai_api_key=self.openai_api_key,
+            llm_str=self.model_backbone["report writing"],
+            compile_pdf=self.compile_pdf  # Changed from compile_pdf
+        )
         # run initialization for solver
         solver.initial_solve()
         # run solver for N mle optimization steps
