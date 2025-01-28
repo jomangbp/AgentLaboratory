@@ -1,6 +1,10 @@
 from utils import *
 from tools import *
 from inference import *
+from openai import OpenAI
+import os
+import json
+import re
 
 
 def extract_json_between_markers(llm_output):
@@ -32,12 +36,68 @@ def extract_json_between_markers(llm_output):
 
 
 
+def query_model(model_str, system_prompt, prompt, temp=None, openai_api_key=None):
+    """Query the specified model with system prompt and user prompt"""
+    
+    # Configure temperature
+    if temp is None:
+        temp = 0.7 if "gpt-4" in model_str else 0.0
+    
+    # Handle different model backends
+    if model_str.startswith("lmstudio-"):
+        client = OpenAI(
+            base_url="http://localhost:1234/v1",
+            api_key="lm-studio"
+        )
+        model_name = model_str.replace('lmstudio-', '')
+    else:
+        if openai_api_key:
+            os.environ["OPENAI_API_KEY"] = openai_api_key
+        client = OpenAI()
+        model_name = model_str
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temp
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        if model_str.startswith("lmstudio-"):
+            print(f"\nError with LM Studio: {str(e)}")
+            print("Please ensure:")
+            print(f"1. LM Studio server is running at http://localhost:1234")
+            print(f"2. Model '{model_name}' is downloaded and loaded")
+        raise
+
+class ReviewersAgent:
+    def __init__(self, model="gpt-4o-mini", notes=None, openai_api_key=None):
+        if notes is None: self.notes = []
+        else: self.notes = notes
+        self.model = model
+        self.openai_api_key = openai_api_key
+
+    def inference(self, plan, report):
+        reviewer_1 = "You are a harsh but fair reviewer and expect good experiments that lead to insights for the research topic."
+        review_1 = get_score(outlined_plan=plan, latex=report, reward_model_llm=self.model, reviewer_type=reviewer_1, openai_api_key=self.openai_api_key)
+
+        reviewer_2 = "You are a harsh and critical but fair reviewer who is looking for an idea that would be impactful in the field."
+        review_2 = get_score(outlined_plan=plan, latex=report, reward_model_llm=self.model, reviewer_type=reviewer_2, openai_api_key=self.openai_api_key)
+
+        reviewer_3 = "You are a harsh but fair open-minded reviewer that is looking for novel ideas that have not been proposed before."
+        review_3 = get_score(outlined_plan=plan, latex=report, reward_model_llm=self.model, reviewer_type=reviewer_3, openai_api_key=self.openai_api_key)
+
+        return f"Reviewer #1:\n{review_1}, \nReviewer #2:\n{review_2}, \nReviewer #3:\n{review_3}"
+
+
 def get_score(outlined_plan, latex, reward_model_llm, reviewer_type=None, attempts=3, openai_api_key=None):
     e = str()
     for _attempt in range(attempts):
         try:
-            # todo: have a reward function here
-            # template inherited from the AI Scientist (good work on this prompt Sakana AI team :D)
             template_instructions = """
             Respond in the following format:
 
@@ -71,11 +131,8 @@ def get_score(outlined_plan, latex, reward_model_llm, reviewer_type=None, attemp
             - "Overall": A rating from 1 to 10 (very strong reject to award quality).
             - "Confidence": A rating from 1 to 5 (low, medium, high, very high, absolute).
             - "Decision": A decision that has to be one of the following: Accept, Reject.
-
-            For the "Decision" field, don't use Weak Accept, Borderline Accept, Borderline Reject, or Strong Reject. Instead, only use Accept or Reject.
-            This JSON will be automatically parsed, so ensure the format is precise.
             """
-            neurips_form = ("""
+            neurips_form = """
                 ## Review Form
                 Below is a description of the questions you will be asked on the review form for each paper and some guidelines on what to consider when answering these questions.
                 When writing your review, please keep in mind that after decisions have been made, reviews and meta-reviews of accepted papers and opted-in rejected papers will be made public. 
@@ -132,21 +189,29 @@ def get_score(outlined_plan, latex, reward_model_llm, reviewer_type=None, attemp
                   1: Your assessment is an educated guess. The submission is not in your area or the submission was difficult to understand. Math/other details were not carefully checked.
 
                   You must make sure that all sections are properly created: abstract, introduction, methods, results, and discussion. Points must be reduced from your scores if any of these are missing.
-                """ + template_instructions)
-            if reviewer_type is None: reviewer_type = ""
+                """ + template_instructions
+            if reviewer_type is None: 
+                reviewer_type = ""
+            
             sys = (
-                      "You are an AI researcher who is reviewing a paper that was submitted to a prestigious ML venue. "
-                      f"Be critical and cautious in your decision. {reviewer_type}\n"
-                  ) + neurips_form
+                "You are an AI researcher who is reviewing a paper that was submitted to a prestigious ML venue. "
+                f"Be critical and cautious in your decision. {reviewer_type}\n"
+            ) + neurips_form
+
             scoring = query_model(
                 model_str=f"{reward_model_llm}",
                 system_prompt=sys,
                 openai_api_key=openai_api_key,
                 prompt=(
                     f"Outlined in the following text is the research plan that the machine learning engineer was tasked with building: {outlined_plan}\n\n"
-                    f"The following text is the research latex that the model produced: \n{latex}\n\n"), temp=0.0)
+                    f"The following text is the research latex that the model produced: \n{latex}\n\n"
+                ), 
+                temp=0.0
+            )
+
             review_json = extract_json_between_markers(scoring)
 
+            # Calculate scores
             overall = int(review_json["Overall"]) / 10
             soundness = int(review_json["Soundness"]) / 4
             confidence = int(review_json["Confidence"]) / 5
@@ -157,6 +222,7 @@ def get_score(outlined_plan, latex, reward_model_llm, reviewer_type=None, attemp
             quality = int(review_json["Quality"]) / 4
             significance = int(review_json["Significance"]) / 4
 
+            # Define weights
             clarity_weight = 0.1
             quality_weight = 0.1
             overall_weight = 1.0
@@ -167,13 +233,26 @@ def get_score(outlined_plan, latex, reward_model_llm, reviewer_type=None, attemp
             contribution_weight = 0.4
             presentation_weight = 0.2
 
-            # max possible
             max_score = (
-                clarity_weight + quality_weight + overall_weight + soundness_weight + confidence_weight + originality_weight + significance_weight + contribution_weight + presentation_weight)
+                clarity_weight + quality_weight + overall_weight + soundness_weight + 
+                confidence_weight + originality_weight + significance_weight + 
+                contribution_weight + presentation_weight
+            )
 
             performance = ((
-               soundness_weight * soundness + presentation_weight * presentation + confidence_weight * confidence + contribution_weight * contribution + overall_weight * overall + originality_weight * originality + significance * significance_weight + clarity_weight * clarity + quality_weight * quality) / max_score) * 10
+                soundness_weight * soundness + 
+                presentation_weight * presentation + 
+                confidence_weight * confidence + 
+                contribution_weight * contribution + 
+                overall_weight * overall + 
+                originality_weight * originality + 
+                significance * significance_weight + 
+                clarity_weight * clarity + 
+                quality_weight * quality
+            ) / max_score) * 10
+
             return performance, f"The performance of your submission is: {performance}" + scoring, True
+
         except Exception as e:
             print(e)
             return None, str(e), False
@@ -206,6 +285,11 @@ class BaseAgent:
         else: self.notes = notes
         self.max_steps = max_steps
         self.model = model
+        
+        # Initialize LM Studio client if using lmstudio- prefix
+        if isinstance(model, str) and model.startswith("lmstudio-"):
+            os.environ['OPENAI_API_BASE'] = "http://localhost:1234/v1"
+            
         self.phases = []
         self.plan = str()
         self.report = str()
@@ -423,7 +507,7 @@ class PostdocAgent(BaseAgent):
         elif phase == "results interpretation":
             phase_str = (
                 "You are directing a PhD student to help them come up with an interpretation for results from an experiment, and you interact with them through dialogue.\n"
-                "Your goal is to interpret results from experiments that were previously run. You should read through the code and look at the results to understand what occurred. You should then discuss with the PhD student how they can interpret the results and give their feedback to improve their thoughts. You should integrate the provided literature review, code, and plans to come up with an exciting interpretation that could make a compelling paper. Your plans should provide a clear outline that can be used to write an academic paper.\n"
+                "Your goal is to interpret results from experiments that were previously run. You should read through the code and look at the results to understand what occurred. You should then discuss with the postdoc your interpretation and use their feedback to improve your thoughts. You should integrate the provided literature review, code, and plans to come up with an exciting interpretation that could make a compelling paper. Your plans should provide a clear outline that can be used to write an academic paper.\n"
                 "Your interpretation should include numbers, relevant metrics to the experiment (e.g. accuracy or loss) and measures of significance. You must propagate this information accurately. You must also complete this in a reasonable amount of time and then submit your results.\n"
             )
         return phase_str
@@ -723,6 +807,3 @@ class PhDStudentAgent(BaseAgent):
         return "Provided here is a literature review on this topic:\n" + "\n".join(
             f"arXiv ID: {_l['arxiv_id']}, Summary: {_l['summary']}"
             for _l in self.lit_review)
-
-
-
