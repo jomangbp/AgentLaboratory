@@ -37,6 +37,31 @@ def query_model(model_str, prompt, system_prompt, openai_api_key=None, anthropic
     preloaded_api = os.getenv('OPENAI_API_KEY')
     deepseek_api = os.getenv('DEEPSEEK_API_KEY')
     
+    # Handle LM Studio models
+    if model_str.startswith("lmstudio-"):
+        for _ in range(tries):
+            try:
+                client = OpenAI(
+                    base_url="http://localhost:1234/v1",
+                    api_key="lm-studio"
+                )
+                model_name = model_str.replace('lmstudio-', '')
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=temp if temp is not None else 0.7
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                print(f"LM Studio API Error: {e}")
+                time.sleep(timeout)
+                continue
+        raise Exception("Max retries: timeout for LM Studio")
+
     # Add Ollama model handling
     if model_str.startswith("ollama-"):
         for _ in range(tries):
