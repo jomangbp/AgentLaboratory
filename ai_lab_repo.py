@@ -2,12 +2,10 @@ from agents import *
 from copy import copy
 from common_imports import *
 from mlesolver import MLESolver
-
 import argparse
 import pickle
 
 DEFAULT_LLM_BACKBONE = "o1-mini"
-
 
 class LaboratoryWorkflow:
     def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), 
@@ -32,18 +30,36 @@ class LaboratoryWorkflow:
         self.research_topic = research_topic
         self.model_backbone = agent_model_backbone
         self.num_papers_lit_review = num_papers_lit_review
-
+        
+        # Configure LM Studio if needed
+        if isinstance(agent_model_backbone, str) and agent_model_backbone.startswith("lmstudio-"):
+            os.environ['OPENAI_API_BASE'] = "http://localhost:1234/v1"
+            print("\n🔧 Configuring LM Studio integration...")
+            try:
+                client = OpenAI(
+                    base_url="http://localhost:1234/v1",
+                    api_key="lm-studio"
+                )
+                models = client.models.list()
+                model_name = agent_model_backbone.replace('lmstudio-', '')
+                available_models = [model.id for model in models.data]
+                if model_name in available_models:
+                    print("✅ LM Studio model verified and ready")
+                else:
+                    print(f"⚠️ Warning: Model {model_name} not found in LM Studio")
+                    print(f"Available models: {available_models}")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not verify LM Studio connection: {e}")
+                print("Please ensure LM Studio server is running on port 1234")
+        
         self.print_cost = True
-        self.review_override = True # should review be overridden?
-        self.review_ovrd_steps = 0 # review steps so far
+        self.review_override = True
+        self.review_ovrd_steps = 0
         self.arxiv_paper_exp_time = 3
         self.reference_papers = list()
 
-        ##########################################
-        ####### COMPUTE BUDGET PARAMETERS ########
-        ##########################################
         self.num_ref_papers = 1
-        self.review_total_steps = 1  # Añadir un valor por defecto
+        self.review_total_steps = 1
         self.arxiv_num_summaries = 5
         self.mlesolver_max_steps = mlesolver_max_steps
         self.papersolver_max_steps = papersolver_max_steps
@@ -65,9 +81,7 @@ class LaboratoryWorkflow:
                 for subtask in subtasks:
                     self.phase_models[subtask] = agent_model_backbone
         elif type(agent_model_backbone) == dict:
-            # todo: check if valid
             self.phase_models = agent_model_backbone
-
 
         self.human_in_loop_flag = human_in_loop_flag
 
@@ -105,22 +119,11 @@ class LaboratoryWorkflow:
         self.reviewers.model = model
 
     def save_state(self, phase):
-        """
-        Save state for phase
-        @param phase: (str) phase string
-        @return: None
-        """
         phase = phase.replace(" ", "_")
         with open(f"state_saves/{phase}.pkl", "wb") as f:
             pickle.dump(self, f)
 
     def set_agent_attr(self, attr, obj):
-        """
-        Set attribute for all agents
-        @param attr: (str) agent attribute
-        @param obj: (object) object attribute
-        @return: None
-        """
         setattr(self.phd, attr, obj)
         setattr(self.postdoc, attr, obj)
         setattr(self.professor, attr, obj)
@@ -128,10 +131,6 @@ class LaboratoryWorkflow:
         setattr(self.sw_engineer, attr, obj)
 
     def reset_agents(self):
-        """
-        Reset all agent states
-        @return: None
-        """
         self.phd.reset()
         self.postdoc.reset()
         self.professor.reset()
@@ -481,47 +480,51 @@ class LaboratoryWorkflow:
                 print("Warning: Empty response from PhD agent, retrying phase...")
                 return True
 
-            if self.verbose: 
-                print("Initial PhD response:", resp, "\n~~~~~~~~~~~")
+            if self.verbose:
+                print("\n" + "="*80)
+                print("📚 Literature Review Phase".center(80))
+                print("="*80 + "\n")
+                print("Initial PhD response:", resp, "\n" + "-"*40)
 
-            # iterate until max num tries to complete task is exhausted
             for _i in range(max_tries):
                 feedback = str()
                 
-                # Add timeout check
                 if _i > 0 and _i % 10 == 0:
-                    print(f"Literature review in progress... Step {_i}/{max_tries}")
+                    print(f"\n🔄 Progress: Step {_i}/{max_tries}")
 
-                # grab summary of papers from arxiv
                 if "```SUMMARY" in resp:
                     query = extract_prompt(resp, "SUMMARY")
+                    print(f"\n🔍 Searching papers for: {query}")
                     papers = arx_eng.find_papers_by_str(query, N=self.arxiv_num_summaries)
                     feedback = f"You requested arXiv papers related to the query {query}, here was the response\n{papers}"
 
-                # grab full text from arxiv ID
                 elif "```FULL_TEXT" in resp:
                     query = extract_prompt(resp, "FULL_TEXT")
-                    # expiration timer so that paper does not remain in context too long
+                    print(f"\n📄 Retrieving full text for paper: {query}")
                     arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + arx_eng.retrieve_full_paper_text(query) + "```"
                     feedback = arxiv_paper
 
-                # if add paper, extract and add to lit review, provide feedback
                 elif "```ADD_PAPER" in resp:
                     query = extract_prompt(resp, "ADD_PAPER")
+                    print(f"\n➕ Adding paper to review: {query}")
                     feedback, text = self.phd.add_review(query, arx_eng)
                     if len(self.reference_papers) < self.num_ref_papers:
                         self.reference_papers.append(text)
 
-                # completion condition
                 if len(self.phd.lit_review) >= self.num_papers_lit_review:
                     lit_review_sum = self.phd.format_review()
                     if lit_review_sum and lit_review_sum.strip():
                         if self.human_in_loop_flag["literature review"]:
+                            print("\n" + "="*80)
+                            print("📋 Literature Review Summary".center(80))
+                            print("="*80 + "\n")
+                            print(lit_review_sum)
+                            print("\n" + "="*80)
                             retry = self.human_in_loop("literature review", lit_review_sum)
                             if retry:
                                 self.phd.lit_review = []
                                 return retry
-                        if self.verbose: 
+                        if self.verbose:
                             print(self.phd.lit_review_sum)
                         self.set_agent_attr("lit_review_sum", lit_review_sum)
                         self.reset_agents()
@@ -531,14 +534,14 @@ class LaboratoryWorkflow:
                 resp = self.phd.inference(self.research_topic, "literature review", 
                                         feedback=feedback, step=_i + 1, temp=0.8)
                 if resp is None or resp.strip() == "":
-                    print("Warning: Empty response from PhD agent, retrying step...")
+                    print("\n⚠️ Warning: Empty response from PhD agent, retrying step...")
                     continue
 
         except Exception as e:
-            print(f"Error in literature review: {str(e)}")
+            print(f"\n❌ Error in literature review: {str(e)}")
             if "Max retries exceeded" in str(e):
-                print("ArXiv API rate limit reached. Waiting before retrying...")
-                time.sleep(60)  # Esperar 1 minuto
+                print("⏳ ArXiv API rate limit reached. Waiting before retrying...")
+                time.sleep(60)
             return True
 
         raise Exception("Max tries during phase: Literature Review")
@@ -571,8 +574,6 @@ class LaboratoryWorkflow:
                 return True
             else: print("Invalid response, type Y or N")
         return False
-
-
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="AgentLaboratory Research Workflow")
@@ -665,7 +666,6 @@ def parse_arguments():
 
     return parser.parse_args()
 
-
 if __name__ == "__main__":
     args = parse_arguments()
 
@@ -682,6 +682,10 @@ if __name__ == "__main__":
     # Modify the API key validation logic
     if args.llm_backend.startswith("ollama-"):
         api_key = None  # No API key needed for Ollama
+    elif args.llm_backend.startswith("lmstudio-"):
+        api_key = "dummy_key"  # Use dummy key for LM Studio
+        os.environ['OPENAI_API_BASE'] = "http://localhost:1234/v1"
+        print(f"Using LM Studio with model: {args.llm_backend.replace('lmstudio-', '')}")
     elif args.api_key:
         api_key = args.api_key
     elif args.deepseek_api_key and args.llm_backend in ["deepseek-chat", "deepseek-reasoner"]:
@@ -691,7 +695,8 @@ if __name__ == "__main__":
     elif os.getenv('DEEPSEEK_API_KEY') and args.llm_backend in ["deepseek-chat", "deepseek-reasoner"]:
         api_key = os.getenv('DEEPSEEK_API_KEY')
     else:
-        raise ValueError("API key must be provided via --api-key / -deepseek-api-key or the OPENAI_API_KEY / DEEPSEEK_API_KEY environment variable.")
+        if not args.llm_backend.startswith("ollama-"):  # Only raise error if not using Ollama
+            raise ValueError("API key must be provided via --api-key / -deepseek-api-key or the OPENAI_API_KEY / DEEPSEEK_API_KEY environment variable.")
 
     ##########################################################
     # Research question that the agents are going to explore #
