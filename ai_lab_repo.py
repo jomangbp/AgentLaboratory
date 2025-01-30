@@ -4,25 +4,31 @@ from common_imports import *
 from mlesolver import MLESolver
 import argparse
 import pickle
+from token_processor import token_processor
 
-DEFAULT_LLM_BACKBONE = "o1-mini"
+DEFAULT_LLM_BACKBONE = "deepseek-r1-distill-llama-70b"
 
 class LaboratoryWorkflow:
-    def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), 
-             human_in_loop_flag={"literature review": False, "plan formulation": False, 
-                                "data preparation": False, "running experiments": False,
-                                "results interpretation": False, "report writing": False,
-                                "report refinement": False}, 
-             compile_pdf=True, mlesolver_max_steps=3, papersolver_max_steps=5):
-        """
-        Initialize laboratory workflow
-        @param research_topic: (str) description of research idea to explore
-        @param max_steps: (int) max number of steps for each phase, i.e. compute tolerance budget
-        @param num_papers_lit_review: (int) number of papers to include in the lit review
-        @param agent_model_backbone: (str or dict) model backbone to use for agents
-        @param notes: (list) notes for agent to follow during tasks
-        """
-
+    def __init__(self, research_topic, openai_api_key, max_steps=100, num_papers_lit_review=5, 
+                 agent_model_backbone=f"{DEFAULT_LLM_BACKBONE}", notes=list(), 
+                 human_in_loop_flag={"literature review": False, "plan formulation": False, 
+                                    "data preparation": False, "running experiments": False,
+                                    "results interpretation": False, "report writing": False,
+                                    "report refinement": False}, 
+                 compile_pdf=True, mlesolver_max_steps=3, papersolver_max_steps=5):
+        
+        # Remove token processing attributes as they're now handled by token_processor
+        self.max_topic_length = 5000
+        self.max_paper_length = 5000
+        
+        # Token and text limits
+        self.max_tokens = 5000  # Límite máximo de tokens por respuesta
+        self.chunk_size = 4000  # Tamaño de chunk para procesar respuestas largas
+        self.overlap_size = 500  # Solapamiento entre chunks
+        self.max_topic_length = 5000  # Límite para modelos Groq
+        self.max_paper_length = 5000  # Límite para papers
+        self.avg_chars_per_token = 4  # Aproximación de caracteres por token
+        
         self.notes = notes
         self.max_steps = max_steps
         self.compile_pdf = compile_pdf
@@ -60,9 +66,10 @@ class LaboratoryWorkflow:
 
         self.num_ref_papers = 1
         self.review_total_steps = 1
-        self.arxiv_num_summaries = 5
+        self.arxiv_num_summaries = 2  # Reducido de 5 a 2
         self.mlesolver_max_steps = mlesolver_max_steps
         self.papersolver_max_steps = papersolver_max_steps
+        self.max_steps = 50  # Reducido de 100 a 50 para evitar bucles largos
 
         self.phases = [
             ("literature review", ["literature review"]),
@@ -467,50 +474,64 @@ class LaboratoryWorkflow:
         raise Exception("Max tries during phase: Plan Formulation")
 
     def literature_review(self):
-        """
-        Perform literature review phase
-        @return: (bool) whether to repeat the phase
-        """
         arx_eng = ArxivSearch()
-        max_tries = self.max_steps * 5  # lit review often requires extra steps
+        max_tries = self.max_steps * 2
+        GROQ_MAX_CHARS = 2000  # Aproximadamente 500-600 tokens
         try:
-            # get initial response from PhD agent with timeout
-            resp = self.phd.inference(self.research_topic, "literature review", step=0, temp=0.8)
+            # Reducir drásticamente los límites para Groq
+            initial_topic = token_processor.truncate_text(self.research_topic, GROQ_MAX_CHARS // 2)
+            
+            # Procesar la respuesta inicial con límites estrictos
+            resp = self.phd.inference(
+                research_topic=initial_topic,
+                phase="literature review",
+                step=0,
+                temp=0.8
+            )
+            
+            # Procesar la respuesta para asegurar límites de Groq
+            resp = token_processor.process_response(resp, self.model_backbone)
+            
             if resp is None or resp.strip() == "":
                 print("Warning: Empty response from PhD agent, retrying phase...")
                 return True
-
+        
             if self.verbose:
                 print("\n" + "="*80)
                 print("📚 Literature Review Phase".center(80))
                 print("="*80 + "\n")
-                print("Initial PhD response:", resp, "\n" + "-"*40)
-
+                print("Initial PhD response:", resp[:200] + "..." if len(resp) > 200 else resp)
+        
             for _i in range(max_tries):
                 feedback = str()
                 
-                if _i > 0 and _i % 10 == 0:
-                    print(f"\n🔄 Progress: Step {_i}/{max_tries}")
-
                 if "```SUMMARY" in resp:
                     query = extract_prompt(resp, "SUMMARY")
+                    query = token_processor.truncate_text(query, GROQ_MAX_CHARS // 4)  # ~250 tokens
                     print(f"\n🔍 Searching papers for: {query}")
-                    papers = arx_eng.find_papers_by_str(query, N=self.arxiv_num_summaries)
-                    feedback = f"You requested arXiv papers related to the query {query}, here was the response\n{papers}"
-
+                    papers = arx_eng.find_papers_by_str(query, N=2)
+                    papers_str = token_processor.truncate_text(str(papers), GROQ_MAX_CHARS // 2)  # ~500 tokens
+                    feedback = f"Papers related to {query}:\n{papers_str}"
+        
                 elif "```FULL_TEXT" in resp:
                     query = extract_prompt(resp, "FULL_TEXT")
                     print(f"\n📄 Retrieving full text for paper: {query}")
-                    arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n" + arx_eng.retrieve_full_paper_text(query) + "```"
+                    paper_text = arx_eng.retrieve_full_paper_text(query)
+                    paper_text = token_processor.truncate_text(paper_text, GROQ_MAX_CHARS // 2)  # ~500 tokens
+                    arxiv_paper = f"```EXPIRATION {self.arxiv_paper_exp_time}\n{paper_text}```"
                     feedback = arxiv_paper
-
+        
                 elif "```ADD_PAPER" in resp:
                     query = extract_prompt(resp, "ADD_PAPER")
                     print(f"\n➕ Adding paper to review: {query}")
                     feedback, text = self.phd.add_review(query, arx_eng)
+                    # Asegurar que el feedback no exceda el límite
+                    feedback = token_processor.truncate_text(feedback, GROQ_MAX_CHARS)
                     if len(self.reference_papers) < self.num_ref_papers:
+                        # Truncar el texto antes de agregarlo
+                        text = token_processor.truncate_text(text, GROQ_MAX_CHARS)
                         self.reference_papers.append(text)
-
+        
                 if len(self.phd.lit_review) >= self.num_papers_lit_review:
                     lit_review_sum = self.phd.format_review()
                     if lit_review_sum and lit_review_sum.strip():
@@ -574,6 +595,134 @@ class LaboratoryWorkflow:
                 return True
             else: print("Invalid response, type Y or N")
         return False
+
+    def truncate_text(self, text, max_length):
+        """Helper para truncar texto"""
+        if text and len(text) > max_length:
+            return text[:max_length] + "... [truncated]"
+        return text
+
+    def estimate_tokens(self, text):
+        """Estima el número aproximado de tokens en un texto"""
+        if not text:
+            return 0
+        return len(text) // self.avg_chars_per_token
+
+    def process_agent_response(self, response, model):
+        """Procesa la respuesta del agente dividiéndola en chunks si es necesario"""
+        if not response or not isinstance(response, str):
+            return response
+            
+        # Si es un modelo Groq o la respuesta es corta, aplicar clip_tokens
+        if str(model).lower().startswith("groq-") or self.estimate_tokens(response) <= self.max_tokens:
+            message = [{"role": "assistant", "content": response}]
+            message = clip_tokens(message, model=model, max_tokens=self.max_tokens)
+            return message[0]["content"]
+            
+        # Para respuestas largas, dividir en chunks
+        chunks = self.split_into_chunks(response)
+        processed_chunks = []
+        
+        for chunk in chunks:
+            message = [{"role": "assistant", "content": chunk}]
+            message = clip_tokens(message, model=model, max_tokens=self.max_tokens)
+            processed_chunks.append(message[0]["content"])
+        
+        return "\n".join(processed_chunks)
+
+    def inference_with_chunks(self, agent, research_topic, phase, feedback="", step=0, temp=0.7):
+        """Wrapper para inference que maneja chunks"""
+        current_model = self.phase_models[phase] if isinstance(self.phase_models, dict) else self.model_backbone
+        
+        # Procesar el research_topic
+        if isinstance(research_topic, str):
+            research_topic = token_processor.process_response(research_topic, current_model)
+            
+        # Procesar el feedback
+        if feedback:
+            feedback = token_processor.process_response(feedback, current_model)
+        
+        # Realizar la inferencia y procesar la respuesta
+        response = agent.inference(research_topic, phase, feedback, step, temp)
+        return token_processor.process_response(response, current_model)
+
+    # Remove the token processing methods as they're now in utils.py
+
+    def human_in_loop(self, phase, phase_prod):
+        """
+        Get human feedback for phase output
+        @param phase: (str) current phase
+        @param phase_prod: (str) current phase result
+        @return: (bool) whether to repeat the loop
+        """
+        print("\n\n\n\n\n")
+        print(f"Presented is the result of the phase [{phase}]: {phase_prod}")
+        y_or_no = None
+        # repeat until a valid answer is provided
+        while y_or_no not in ["y", "n"]:
+            y_or_no = input("\n\n\nAre you happy with the presented content? Respond Y or N: ").strip().lower()
+            # if person is happy with feedback, move on to next stage
+            if y_or_no == "y": pass
+            # if not ask for feedback and repeat
+            elif y_or_no == "n":
+                # ask the human for feedback
+                notes_for_agent = input("Please provide notes for the agent so that they can try again and improve performance: ")
+                # reset agent state
+                self.reset_agents()
+                # add suggestions to the notes
+                self.notes.append({
+                    "phases": [phase],
+                    "note": notes_for_agent})
+                return True
+            else: print("Invalid response, type Y or N")
+        return False
+
+    def truncate_text(self, text, max_length):
+        """Helper para truncar texto"""
+        if text and len(text) > max_length:
+            return text[:max_length] + "... [truncated]"
+        return text
+
+    def estimate_tokens(self, text):
+        """Estima el número aproximado de tokens en un texto"""
+        if not text:
+            return 0
+        return len(text) // self.avg_chars_per_token
+
+    def split_into_chunks(self, text, chunk_size=None, overlap_size=None):
+        """Helper para dividir texto en chunks con overlap"""
+        if text is None:
+            return []
+            
+        chunk_size = chunk_size or self.chunk_size
+        overlap_size = overlap_size or self.overlap_size
+        
+        chunks = []
+        start = 0
+        text_len = len(text)
+        
+        while start < text_len:
+            end = start + chunk_size
+            if end < text_len:
+                # Buscar el último espacio en blanco dentro del overlap
+                while end > start + chunk_size - overlap_size and text[end-1] != ' ':
+                    end -= 1
+                chunk = text[start:end]
+                if self.estimate_tokens(chunk) > self.chunk_size:
+                    # Ajustar el tamaño si excede el límite de tokens
+                    end = start + (chunk_size * self.avg_chars_per_token)
+            else:
+                end = text_len
+            
+            chunk = text[start:end]
+            chunks.append(chunk)
+            
+            if self.verbose:
+                print(f"Chunk {len(chunks)}: {self.estimate_tokens(chunk)} tokens aprox.")
+            
+            start = end - overlap_size if end < text_len else text_len
+            
+        return chunks
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="AgentLaboratory Research Workflow")
@@ -669,7 +818,7 @@ def parse_arguments():
 if __name__ == "__main__":
     args = parse_arguments()
 
-    llm_backend = args.llm_backend
+    llm_backend = args.llm_backend if args.llm_backend != "o1-mini" else DEFAULT_LLM_BACKBONE
     human_mode = args.copilot_mode.lower() == "true"
     compile_pdf = args.compile_latex.lower() == "true"
     load_existing = args.load_existing.lower() == "true"
@@ -686,6 +835,12 @@ if __name__ == "__main__":
         api_key = "dummy_key"  # Use dummy key for LM Studio
         os.environ['OPENAI_API_BASE'] = "http://localhost:1234/v1"
         print(f"Using LM Studio with model: {args.llm_backend.replace('lmstudio-', '')}")
+    elif args.llm_backend.startswith("groq-"):
+        if args.api_key:
+            os.environ['GROQ_API_KEY'] = args.api_key
+            api_key = args.api_key
+        else:
+            raise ValueError("API key must be provided via --api-key when using Groq backend")
     elif args.api_key:
         api_key = args.api_key
     elif args.deepseek_api_key and args.llm_backend in ["deepseek-chat", "deepseek-reasoner"]:
