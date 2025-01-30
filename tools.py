@@ -393,6 +393,3 @@ def execute_code(code_str, timeout=60, MAX_LEN=1000):
 
     # Returning the captured output
     return output_capture.getvalue()[:MAX_LEN]
-
-
-
