@@ -2,7 +2,7 @@ import os, re
 import shutil
 import tiktoken
 import subprocess
-
+from token_processor import clip_tokens, process_response
 
 def compile_latex(latex_code, compile=True, output_filename="output.pdf", timeout=30):
     latex_code = latex_code.replace(
@@ -39,9 +39,11 @@ def compile_latex(latex_code, compile=True, output_filename="output.pdf", timeou
         # If there is an error during LaTeX compilation, return the error message
         return f"[CODE EXECUTION ERROR]: Compilation failed: {e.stderr.decode('utf-8')} {e.output.decode('utf-8')}. There was an error in your latex."
 
-
 def count_tokens(messages, model="gpt-4"):
-    enc = tiktoken.encoding_for_model(model)
+    if str(model).lower().startswith("groq-"):
+        enc = tiktoken.encoding_for_model("gpt-4")  # Usar tokenizador base para Groq
+    else:
+        enc = tiktoken.encoding_for_model(model)
     num_tokens = sum([len(enc.encode(message["content"])) for message in messages])
     return num_tokens
 
@@ -62,7 +64,6 @@ def remove_directory(dir_path):
     else:
         print(f"Directory {dir_path} does not exist or is not a directory.")
 
-
 def save_to_file(location, filename, data):
     """Utility function to save data as plain text."""
     filepath = os.path.join(location, filename)
@@ -73,9 +74,14 @@ def save_to_file(location, filename, data):
     except Exception as e:
         print(f"Error saving file {filename}: {e}")
 
-
 def clip_tokens(messages, model="gpt-4", max_tokens=100000):
-    enc = tiktoken.encoding_for_model(model)
+    # Ajuste específico para modelos Groq
+    if str(model).lower().startswith("groq-"):
+        max_tokens = 6000  # Límite fijo para Groq
+        enc = tiktoken.encoding_for_model("gpt-4")  # Usar tokenizador base
+    else:
+        enc = tiktoken.encoding_for_model(model)
+        
     total_tokens = sum([len(enc.encode(message["content"])) for message in messages])
 
     if total_tokens <= max_tokens:
@@ -110,12 +116,8 @@ def clip_tokens(messages, model="gpt-4", max_tokens=100000):
             current_idx += message_token_count
     return clipped_messages
 
-
-
 def extract_prompt(text, word):
     code_block_pattern = rf"```{word}(.*?)```"
     code_blocks = re.findall(code_block_pattern, text, re.DOTALL)
     extracted_code = "\n".join(code_blocks).strip()
     return extracted_code
-
-
