@@ -2,6 +2,8 @@ from utils import *
 from tools import *
 from inference import *
 from openai import OpenAI
+from inference import query_model
+from token_processor import process_response
 import os
 import json
 import re
@@ -50,6 +52,26 @@ def query_model(model_str, system_prompt, prompt, temp=None, openai_api_key=None
             api_key="lm-studio"
         )
         model_name = model_str.replace('lmstudio-', '')
+    elif model_str.startswith("groq-"):
+        groq_api = os.getenv('GROQ_API_KEY')
+        if not groq_api:
+            raise Exception("No Groq API key provided")
+        client = OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=groq_api
+        )
+        model_name = model_str.replace('groq-', '')
+        
+        # Add token limit handling for Groq
+        encoding = tiktoken.get_encoding("cl100k_base")
+        total_tokens = len(encoding.encode(system_prompt)) + len(encoding.encode(prompt))
+        
+        if total_tokens > 6000:
+            # Truncate the prompt while keeping the system prompt intact
+            available_tokens = 6000 - len(encoding.encode(system_prompt)) - 100  # Buffer of 100 tokens
+            prompt_tokens = encoding.encode(prompt)[:available_tokens]
+            prompt = encoding.decode(prompt_tokens)
+            print(f"Warning: Message truncated to fit within Groq's token limit. Using {total_tokens} tokens.")
     else:
         if openai_api_key:
             os.environ["OPENAI_API_KEY"] = openai_api_key
@@ -807,3 +829,6 @@ class PhDStudentAgent(BaseAgent):
         return "Provided here is a literature review on this topic:\n" + "\n".join(
             f"arXiv ID: {_l['arxiv_id']}, Summary: {_l['summary']}"
             for _l in self.lit_review)
+
+
+
